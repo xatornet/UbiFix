@@ -1,0 +1,36 @@
+name: Build ASI DLL
+
+on:
+push:
+workflow_dispatch:
+
+jobs:
+build:
+runs-on: windows-latest
+
+```
+steps:
+- name: Checkout repo
+  uses: actions/checkout@v4
+
+- name: Setup MSVC
+  uses: ilammy/msvc-dev-cmd@v1
+
+- name: Clone Detours
+  run: git clone https://github.com/microsoft/Detours.git
+
+- name: Build Detours
+  run: |
+    cd Detours
+    nmake
+
+- name: Compile DLL
+  run: |
+    cl /LD redirect.cpp /I Detours\include Detours\lib.X64\detours.lib
+
+- name: Upload artifact
+  uses: actions/upload-artifact@v4
+  with:
+    name: redirect-dll
+    path: redirect.dll
+```
