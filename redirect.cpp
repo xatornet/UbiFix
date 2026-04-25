@@ -1,6 +1,24 @@
 #include <windows.h>
 #include <string>
 #include "detours.h"
+#include <fstream>
+
+void Log(const char* msg)
+{
+    std::ofstream f("C:\\temp\\ubifix_log.txt", std::ios::app);
+    f << msg << std::endl;
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule,
+                      DWORD reason,
+                      LPVOID)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        Log("DLL LOADED");
+    }
+    return TRUE;
+}
 
 std::string basePath = "D:\\Instagames\\TC_GR_Future-Soldier\\";
 
