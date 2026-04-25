@@ -155,25 +155,70 @@ HANDLE WINAPI Hook_CreateFileW(LPCWSTR n,DWORD a,DWORD s,LPSECURITY_ATTRIBUTES s
     return Real_CreateFileW(n,a,s,sa,c,f,t);
 }
 
+// Helper: logs LoadLibrary result — on failure logs the Windows error code and message
+static void LogLoadLibResult(const std::string& api, const std::string& name, HMODULE hMod)
+{
+    if (!g_log.is_open()) return;
+    if (hMod)
+    {
+        if (g_traceMode) Log(api + " OK [" + name + "]");
+    }
+    else
+    {
+        DWORD err = GetLastError();
+        char msgBuf[512] = {};
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+            nullptr, err, 0, msgBuf, sizeof(msgBuf), nullptr);
+        // Strip trailing newline from FormatMessage
+        for (int i = (int)strlen(msgBuf)-1; i >= 0 && (msgBuf[i]=='\r'||msgBuf[i]=='\n'); --i)
+            msgBuf[i] = '\0';
+        Log("LoadLibrary FAILED [" + name + "] error=" + std::to_string(err) + " (" + msgBuf + ")");
+    }
+}
+
 // LoadLibraryA/W/ExA/ExW
 static HMODULE (WINAPI *Real_LoadLibraryA)(LPCSTR) = LoadLibraryA;
 HMODULE WINAPI Hook_LoadLibraryA(LPCSTR n){
-    if(n){ LogTrace("LoadLibraryA",n); auto p=PatchPath(n); return Real_LoadLibraryA(p.c_str()); }
+    if(n){
+        LogTrace("LoadLibraryA",n);
+        auto p=PatchPath(n);
+        HMODULE h = Real_LoadLibraryA(p.c_str());
+        LogLoadLibResult("LoadLibraryA", p, h);
+        return h;
+    }
     return Real_LoadLibraryA(n);
 }
 static HMODULE (WINAPI *Real_LoadLibraryW)(LPCWSTR) = LoadLibraryW;
 HMODULE WINAPI Hook_LoadLibraryW(LPCWSTR n){
-    if(n){ LogTrace("LoadLibraryW",WideToNarrow(n)); auto p=PatchPathW(n); return Real_LoadLibraryW(p.c_str()); }
+    if(n){
+        LogTrace("LoadLibraryW",WideToNarrow(n));
+        auto p=PatchPathW(n);
+        HMODULE h = Real_LoadLibraryW(p.c_str());
+        LogLoadLibResult("LoadLibraryW", WideToNarrow(p), h);
+        return h;
+    }
     return Real_LoadLibraryW(n);
 }
 static HMODULE (WINAPI *Real_LoadLibraryExA)(LPCSTR,HANDLE,DWORD) = LoadLibraryExA;
 HMODULE WINAPI Hook_LoadLibraryExA(LPCSTR n,HANDLE h,DWORD f){
-    if(n){ LogTrace("LoadLibraryExA",n); auto p=PatchPath(n); return Real_LoadLibraryExA(p.c_str(),h,f); }
+    if(n){
+        LogTrace("LoadLibraryExA",n);
+        auto p=PatchPath(n);
+        HMODULE hMod = Real_LoadLibraryExA(p.c_str(),h,f);
+        LogLoadLibResult("LoadLibraryExA", p, hMod);
+        return hMod;
+    }
     return Real_LoadLibraryExA(n,h,f);
 }
 static HMODULE (WINAPI *Real_LoadLibraryExW)(LPCWSTR,HANDLE,DWORD) = LoadLibraryExW;
 HMODULE WINAPI Hook_LoadLibraryExW(LPCWSTR n,HANDLE h,DWORD f){
-    if(n){ LogTrace("LoadLibraryExW",WideToNarrow(n)); auto p=PatchPathW(n); return Real_LoadLibraryExW(p.c_str(),h,f); }
+    if(n){
+        LogTrace("LoadLibraryExW",WideToNarrow(n));
+        auto p=PatchPathW(n);
+        HMODULE hMod = Real_LoadLibraryExW(p.c_str(),h,f);
+        LogLoadLibResult("LoadLibraryExW", WideToNarrow(p), hMod);
+        return hMod;
+    }
     return Real_LoadLibraryExW(n,h,f);
 }
 
@@ -220,21 +265,119 @@ LSTATUS WINAPI Hook_RegOpenKeyExA(HKEY h,LPCSTR k,DWORD o,REGSAM s,PHKEY r){
     return Real_RegOpenKeyExA(h,k,o,s,r);
 }
 
-// RegQueryValueExA — patches the VALUE returned, not just the key name
-static LSTATUS (WINAPI *Real_RegQueryValueExA)(HKEY,LPCSTR,LPDWORD,LPDWORD,LPBYTE,LPDWORD) = RegQueryValueExA;
-LSTATUS WINAPI Hook_RegQueryValueExA(HKEY h,LPCSTR n,LPDWORD res,LPDWORD type,LPBYTE data,LPDWORD cb){
-    LSTATUS r = Real_RegQueryValueExA(h,n,res,type,data,cb);
-    if(r==ERROR_SUCCESS && type && (*type==REG_SZ||*type==REG_EXPAND_SZ) && data && cb){
-        std::string val(reinterpret_cast<char*>(data));
-        LogTrace("RegQueryValueExA(ret)",val);
-        std::string patched = PatchPath(val);
-        if(patched!=val){
-            Log("RegQueryValueExA patch value: ["+val+"] -> ["+patched+"]");
-            size_t needed = patched.size()+1;
-            if(*cb >= needed){ memcpy(data,patched.c_str(),needed); *cb=(DWORD)needed; }
+// ─────────────────────────────────────────────
+//  Synchronisation hooks (DRM / event detection)
+// ─────────────────────────────────────────────
+
+// OpenEventA — intercept so we can see what named events the game/DRM waits on.
+// If the event doesn't exist (DRM not running), the game loops forever.
+// With FakeEvents=1 in the INI we create a dummy manual-reset event so the
+// game's OpenEventA succeeds and execution can continue past the DRM check.
+static bool g_fakeEvents = false;
+
+static HANDLE (WINAPI *Real_OpenEventA)(DWORD,BOOL,LPCSTR) = OpenEventA;
+HANDLE WINAPI Hook_OpenEventA(DWORD dwAccess, BOOL bInherit, LPCSTR lpName)
+{
+    if (lpName)
+    {
+        HANDLE h = Real_OpenEventA(dwAccess, bInherit, lpName);
+        if (h)
+        {
+            Log("OpenEventA OK    [" + std::string(lpName) + "]");
+        }
+        else
+        {
+            DWORD err = GetLastError();
+            Log("OpenEventA FAIL  [" + std::string(lpName) + "] err=" + std::to_string(err));
+            if (g_fakeEvents)
+            {
+                // Create a signalled manual-reset event so any WaitForSingleObject
+                // on it returns immediately instead of hanging.
+                h = CreateEventA(nullptr, TRUE, TRUE, lpName);
+                if (h) Log("OpenEventA FAKED [" + std::string(lpName) + "] (signalled)");
+            }
+        }
+        return h;
+    }
+    return Real_OpenEventA(dwAccess, bInherit, lpName);
+}
+
+// WaitForSingleObject — log every wait so we can spot which handle hangs.
+// Only active in TraceMode to avoid log spam during normal play.
+static DWORD (WINAPI *Real_WaitForSingleObject)(HANDLE,DWORD) = WaitForSingleObject;
+DWORD WINAPI Hook_WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds)
+{
+    if (g_traceMode)
+    {
+        std::string timeout = (dwMilliseconds == INFINITE) ? "INFINITE" : std::to_string(dwMilliseconds) + "ms";
+        Log("WaitForSingleObject handle=" + std::to_string(reinterpret_cast<uintptr_t>(hHandle))
+            + " timeout=" + timeout);
+    }
+    DWORD r = Real_WaitForSingleObject(hHandle, dwMilliseconds);
+    if (g_traceMode)
+    {
+        std::string res = (r==WAIT_OBJECT_0) ? "SIGNALLED" :
+                          (r==WAIT_TIMEOUT)  ? "TIMEOUT"   :
+                          (r==WAIT_FAILED)   ? "FAILED"    : std::to_string(r);
+        Log("WaitForSingleObject result=" + res);
+    }
+    return r;
+}
+
+// GetCommandLineA — log the command line the game sees (may contain install path).
+static LPSTR (WINAPI *Real_GetCommandLineA)() = GetCommandLineA;
+LPSTR WINAPI Hook_GetCommandLineA()
+{
+    LPSTR cmd = Real_GetCommandLineA();
+    if (cmd) LogTrace("GetCommandLineA", cmd);
+    return cmd;
+}
+
+// GetModuleFileNameA — if the game checks its own path and expects C:\, patch it.
+static DWORD (WINAPI *Real_GetModuleFileNameA)(HMODULE,LPSTR,DWORD) = GetModuleFileNameA;
+DWORD WINAPI Hook_GetModuleFileNameA(HMODULE hMod, LPSTR lpFilename, DWORD nSize)
+{
+    DWORD r = Real_GetModuleFileNameA(hMod, lpFilename, nSize);
+    if (r > 0 && lpFilename)
+    {
+        LogTrace("GetModuleFileNameA", lpFilename);
+        std::string patched = PatchPath(lpFilename);
+        if (patched != std::string(lpFilename))
+        {
+            Log("GetModuleFileNameA patch: [" + std::string(lpFilename) + "] -> [" + patched + "]");
+            strncpy_s(lpFilename, nSize, patched.c_str(), _TRUNCATE);
+            r = (DWORD)patched.size();
         }
     }
     return r;
+}
+
+// RegQueryValueExA — patches the VALUE returned, not just the key name.
+// Two-pass: first read into our own buffer, patch, then copy back.
+// This handles the case where the patched path is LONGER than the original.
+static LSTATUS (WINAPI *Real_RegQueryValueExA)(HKEY,LPCSTR,LPDWORD,LPDWORD,LPBYTE,LPDWORD) = RegQueryValueExA;
+LSTATUS WINAPI Hook_RegQueryValueExA(HKEY h,LPCSTR n,LPDWORD res,LPDWORD type,LPBYTE data,LPDWORD cb){
+    DWORD realType=0, realSize=0;
+    LSTATUS probe = Real_RegQueryValueExA(h,n,res,&realType,nullptr,&realSize);
+    if((probe!=ERROR_SUCCESS && probe!=ERROR_MORE_DATA) ||
+       (realType!=REG_SZ && realType!=REG_EXPAND_SZ))
+        return Real_RegQueryValueExA(h,n,res,type,data,cb);
+    std::string tmp(realSize,'\0');
+    LSTATUS r = Real_RegQueryValueExA(h,n,res,&realType,reinterpret_cast<LPBYTE>(tmp.data()),&realSize);
+    if(r!=ERROR_SUCCESS) return r;
+    if(realSize>0) tmp.resize(realSize-1);
+    LogTrace("RegQueryValueExA(ret)", tmp);
+    std::string patched = PatchPath(tmp);
+    if(patched!=tmp)
+        Log("RegQueryValueExA patch value: ["+tmp+"] -> ["+patched+"]");
+    if(type)  *type = realType;
+    DWORD needed = (DWORD)(patched.size()+1);
+    if(!cb)   return ERROR_SUCCESS;
+    if(!data) { *cb=needed; return ERROR_SUCCESS; }
+    if(*cb<needed){ *cb=needed; return ERROR_MORE_DATA; }
+    memcpy(data, patched.c_str(), needed);
+    *cb = needed;
+    return ERROR_SUCCESS;
 }
 
 // ─────────────────────────────────────────────
@@ -255,6 +398,7 @@ static void Init()
     g_debugMode  = IsTruthy(LoadIniKey(iniPath, "debugmode"));
     g_traceMode  = IsTruthy(LoadIniKey(iniPath, "tracemode"));
     g_hardcodedC = LoadIniKey(iniPath, "hardcodedpath");
+    g_fakeEvents = IsTruthy(LoadIniKey(iniPath, "fakeevents"));
     while (!g_hardcodedC.empty() &&
            (g_hardcodedC.back()=='\\' || g_hardcodedC.back()=='/'))
         g_hardcodedC.pop_back();
@@ -270,6 +414,7 @@ static void Init()
     Log("Debug mode        : " + std::string(g_debugMode ? "ON" : "OFF"));
     Log("Trace mode        : " + std::string(g_traceMode ? "ON (ALL paths logged)" : "OFF"));
     Log("Hardcoded path    : " + (g_hardcodedC.empty() ? "(auto)" : g_hardcodedC));
+    Log("Fake events       : " + std::string(g_fakeEvents ? "ON" : "OFF"));
     Log("INI path          : " + iniPath);
 
     char drive[4] = {};
@@ -300,6 +445,10 @@ static void Init()
     DetourAttach(&(PVOID&)Real_GetPrivateProfileStringW, Hook_GetPrivateProfileStringW);
     DetourAttach(&(PVOID&)Real_RegOpenKeyExA,            Hook_RegOpenKeyExA);
     DetourAttach(&(PVOID&)Real_RegQueryValueExA,         Hook_RegQueryValueExA);
+    DetourAttach(&(PVOID&)Real_OpenEventA,               Hook_OpenEventA);
+    DetourAttach(&(PVOID&)Real_WaitForSingleObject,      Hook_WaitForSingleObject);
+    DetourAttach(&(PVOID&)Real_GetCommandLineA,           Hook_GetCommandLineA);
+    DetourAttach(&(PVOID&)Real_GetModuleFileNameA,        Hook_GetModuleFileNameA);
     LONG result = DetourTransactionCommit();
     Log(std::string("DetourTransactionCommit result: ") +
         (result == NO_ERROR ? "OK" : "FAILED (" + std::to_string(result) + ")"));
@@ -324,6 +473,10 @@ static void Shutdown()
     DetourDetach(&(PVOID&)Real_GetPrivateProfileStringW, Hook_GetPrivateProfileStringW);
     DetourDetach(&(PVOID&)Real_RegOpenKeyExA,            Hook_RegOpenKeyExA);
     DetourDetach(&(PVOID&)Real_RegQueryValueExA,         Hook_RegQueryValueExA);
+    DetourDetach(&(PVOID&)Real_OpenEventA,               Hook_OpenEventA);
+    DetourDetach(&(PVOID&)Real_WaitForSingleObject,      Hook_WaitForSingleObject);
+    DetourDetach(&(PVOID&)Real_GetCommandLineA,           Hook_GetCommandLineA);
+    DetourDetach(&(PVOID&)Real_GetModuleFileNameA,        Hook_GetModuleFileNameA);
     DetourTransactionCommit();
     Log("=== GhostReconFS-PathFix unloaded ===");
     if (g_log.is_open()) g_log.close();
