@@ -1,34 +1,31 @@
-name: Build ASI DLL
+name: Compilar Plugin ASI
 
 on:
   push:
-  workflow_dispatch:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: # Permite ejecutarlo manualmente desde la pestaña Actions
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    - name: Clonar el repositorio
+      uses: actions/checkout@v3
 
-      - name: Setup MSVC
-        uses: ilammy/msvc-dev-cmd@v1
+    - name: Configurar MSVC (Microsoft Visual C++)
+      uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Clone Detours
-        run: git clone https://github.com/microsoft/Detours.git
+    - name: Configurar CMake
+      run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build Detours
-        run: |
-          cd Detours
-          nmake
+    - name: Compilar el proyecto
+      run: cmake --build build --config Release
 
-      - name: Compile DLL
-        run: |
-          cl /LD redirect.cpp /I Detours\include Detours\lib.X64\detours.lib
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: redirect-dll
-          path: redirect.dll
+    - name: Subir el archivo .asi como artefacto
+      uses: actions/upload-artifact@v3
+      with:
+        name: PathFix-Plugin
+        path: build/Release/PathFix.asi
