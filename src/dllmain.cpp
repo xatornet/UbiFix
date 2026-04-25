@@ -235,14 +235,41 @@ HANDLE WINAPI Hook_FindFirstFileW(LPCWSTR n,LPWIN32_FIND_DATAW d){
 }
 
 // GetFileAttributesA/W
+// Special case: if the game checks "C:" or "C:\" bare root (drive existence check),
+// we return INVALID_FILE_ATTRIBUTES to make the game believe C: doesn't exist.
+// This prevents the game from entering its "I should be on C:" inconsistency logic.
+static bool IsBareC(const std::string& s){
+    if(s.size()<2) return false;
+    char d=std::tolower((unsigned char)s[0]);
+    if(d!='c' || s[1]!=':') return false;
+    // accept "C:", "C:\", "C:/" only
+    return s.size()==2 || ((s.size()==3) && (s[2]=='\\'||s[2]=='/'));
+}
 static DWORD (WINAPI *Real_GetFileAttributesA)(LPCSTR) = GetFileAttributesA;
 DWORD WINAPI Hook_GetFileAttributesA(LPCSTR n){
-    if(n){ LogTrace("GetFileAttributesA",n); auto p=PatchPath(n); return Real_GetFileAttributesA(p.c_str()); }
+    if(n){
+        LogTrace("GetFileAttributesA",n);
+        if(IsBareC(n)){
+            Log("GetFileAttributesA: hiding C: root -> INVALID");
+            SetLastError(ERROR_FILE_NOT_FOUND);
+            return INVALID_FILE_ATTRIBUTES;
+        }
+        auto p=PatchPath(n); return Real_GetFileAttributesA(p.c_str());
+    }
     return Real_GetFileAttributesA(n);
 }
 static DWORD (WINAPI *Real_GetFileAttributesW)(LPCWSTR) = GetFileAttributesW;
 DWORD WINAPI Hook_GetFileAttributesW(LPCWSTR n){
-    if(n){ LogTrace("GetFileAttributesW",WideToNarrow(n)); auto p=PatchPathW(n); return Real_GetFileAttributesW(p.c_str()); }
+    if(n){
+        std::string narrow=WideToNarrow(n);
+        LogTrace("GetFileAttributesW",narrow);
+        if(IsBareC(narrow)){
+            Log("GetFileAttributesW: hiding C: root -> INVALID");
+            SetLastError(ERROR_FILE_NOT_FOUND);
+            return INVALID_FILE_ATTRIBUTES;
+        }
+        auto p=PatchPathW(n); return Real_GetFileAttributesW(p.c_str());
+    }
     return Real_GetFileAttributesW(n);
 }
 
