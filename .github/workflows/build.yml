@@ -13,7 +13,8 @@ jobs:
 
     steps:
     - name: Clonar el repositorio
-      uses: actions/checkout@v3
+      # Actualizado a v4 para evitar errores de obsolescencia
+      uses: actions/checkout@v4 
 
     - name: Configurar MSVC (Microsoft Visual C++)
       uses: ilammy/msvc-dev-cmd@v1
@@ -25,7 +26,8 @@ jobs:
       run: cmake --build build --config Release
 
     - name: Subir el archivo .asi como artefacto
-      uses: actions/upload-artifact@v3
+      # Actualizado a v4 para solucionar el error que mencionas
+      uses: actions/upload-artifact@v4 
       with:
         name: PathFix-Plugin
         path: build/Release/PathFix.asi
