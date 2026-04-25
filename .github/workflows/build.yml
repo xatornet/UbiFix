@@ -20,14 +20,33 @@ jobs:
         with:
           submodules: recursive
 
-      # ── 2. Set up MSVC (Visual Studio Build Tools) ─────────────────────────
-      - name: Set up MSVC environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x86          # ← 32-bit toolchain
+      # ── 2. Add CMake to PATH (preinstalled on windows-latest) ─────────────
+      #       Visual Studio 2022 + its CMake live here; adding both ensures
+      #       cmake.exe is reachable regardless of runner image version.
+      - name: Add CMake to PATH
+        shell: pwsh
+        run: |
+          $cmakePaths = @(
+            "C:\Program Files\CMake\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin",
+            "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"
+          )
+          foreach ($p in $cmakePaths) {
+            if (Test-Path $p) {
+              Write-Host "Found CMake at: $p"
+              "$p" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              break
+            }
+          }
+          cmake --version
 
       # ── 3. Configure CMake for Win32 (x86) ────────────────────────────────
+      #       The "Visual Studio 17 2022" generator is available on
+      #       windows-latest without any extra setup step.
+      #       -A Win32 selects the 32-bit (x86) target platform.
       - name: Configure CMake
+        shell: pwsh
         run: |
           cmake -B build `
                 -G "Visual Studio 17 2022" `
@@ -36,21 +55,21 @@ jobs:
 
       # ── 4. Build ───────────────────────────────────────────────────────────
       - name: Build
-        run: cmake --build build --config Release
+        shell: pwsh
+        run: cmake --build build --config Release --verbose
 
       # ── 5. Collect artefacts ───────────────────────────────────────────────
       - name: Collect output files
+        shell: cmd
         run: |
           mkdir dist
           copy build\Release\GhostReconFS-PathFix.asi dist\
           copy GhostReconFS-PathFix.ini               dist\
-          # Create a simple README for the zip
-          echo "Installation" > dist\INSTALL.txt
-          echo "1. Copy GhostReconFS-PathFix.asi and GhostReconFS-PathFix.ini into your Ghost Recon Future Soldier folder (where GRFSGame.exe lives)." >> dist\INSTALL.txt
-          echo "2. You also need an ASI Loader (e.g. Ultimate ASI Loader - dsound.dll) in the same folder." >> dist\INSTALL.txt
-          echo "3. Launch the game normally." >> dist\INSTALL.txt
-          echo "4. To enable debug logging, set DebugMode=1 in the .ini file." >> dist\INSTALL.txt
-        shell: cmd
+          echo Installation instructions > dist\INSTALL.txt
+          echo 1. Copy GhostReconFS-PathFix.asi and GhostReconFS-PathFix.ini into your Ghost Recon Future Soldier folder (where GRFSGame.exe lives). >> dist\INSTALL.txt
+          echo 2. You also need an ASI Loader (e.g. Ultimate ASI Loader - dsound.dll) in the same folder. >> dist\INSTALL.txt
+          echo 3. Launch the game normally. >> dist\INSTALL.txt
+          echo 4. To enable debug logging, set DebugMode=1 in the .ini file. >> dist\INSTALL.txt
 
       # ── 6. Upload as GitHub Actions artefact ──────────────────────────────
       - name: Upload artefact
