@@ -5,21 +5,24 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+env:
+  # Optamos por Node.js 24 para evitar los avisos de deprecación
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
     - name: Clonar el repositorio
-      uses: actions/checkout@v4
+      uses: actions/checkout@v4 # Esta versión ya es compatible con el cambio de entorno
 
     - name: Configurar MSVC
       uses: ilammy/msvc-dev-cmd@v1
       with:
-        arch: x86 # <--- ESTO FUERZA LA ARQUITECTURA 32 BITS
+        arch: x86
 
     - name: Configurar CMake
-      # Añadimos -A Win32 para asegurar la arquitectura
       run: cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -A Win32
 
     - name: Compilar el proyecto
