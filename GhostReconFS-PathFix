@@ -1,0 +1,16 @@
+; ──────────────────────────────────────────────────────────────
+;  GhostReconFS-PathFix  –  Configuration file
+; ──────────────────────────────────────────────────────────────
+;
+;  Place this file in the same folder as GRFSGame.exe
+;  (the root of your Ghost Recon Future Soldier install).
+;
+; ──────────────────────────────────────────────────────────────
+
+[Settings]
+
+; DebugMode
+;   1 / true / yes  →  Enables verbose logging to GhostReconFS-PathFix.log
+;   0 / false / no  →  Silent mode (recommended for normal play)
+;
+DebugMode=0
