@@ -1,48 +1,83 @@
 #include <windows.h>
+#include <fstream>
 #include <string>
 #include "MinHook.h"
 
-// Prototipos originales
+// --- LOGGING DE EMERGENCIA ---
+void WriteLog(const std::string& text) {
+    // Intentamos escribir en la carpeta temporal del sistema para evitar bloqueos de permisos
+    std::ofstream logFile("C:\\Windows\\Temp\\GhostRecon_PathFix.log", std::ios::app);
+    if (logFile.is_open()) {
+        logFile << text << std::endl;
+        logFile.close();
+    }
+}
+
+// --- PROTOTIPOS ---
 typedef LSTATUS(WINAPI* REGQUERYVALUEEXA)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
-REGQUERYVALUEEXA fpRegQueryValueExA = NULL;
-
+typedef LSTATUS(WINAPI* REGQUERYVALUEEXW)(HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
 typedef DWORD(WINAPI* GETMODULEFILENAMEA)(HMODULE, LPSTR, DWORD);
-GETMODULEFILENAMEA fpGetModuleFileNameA = NULL;
+typedef DWORD(WINAPI* GETMODULEFILENAMEW)(HMODULE, LPWSTR, DWORD);
 
-// Detour: Engañar sobre el Registro
+REGQUERYVALUEEXA fpRegQueryValueExA = NULL;
+REGQUERYVALUEEXW fpRegQueryValueExW = NULL;
+GETMODULEFILENAMEA fpGetModuleFileNameA = NULL;
+GETMODULEFILENAMEW fpGetModuleFileNameW = NULL;
+
+// --- DETOURS (ENGAÑO DE UNIDAD) ---
+
 LSTATUS WINAPI DetourRegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData) {
     LSTATUS status = fpRegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
-    if (status == ERROR_SUCCESS && lpData && lpType && (*lpType == REG_SZ || *lpType == REG_EXPAND_SZ)) {
+    if (status == ERROR_SUCCESS && lpData && (*lpType == REG_SZ || *lpType == REG_EXPAND_SZ)) {
         if ((lpData[0] == 'D' || lpData[0] == 'd') && lpData[1] == ':') {
             lpData[0] = 'C';
+            WriteLog("Registro ANSI parcheado.");
         }
     }
     return status;
 }
 
-// Detour: Engañar sobre la ruta del EXE
+LSTATUS WINAPI DetourRegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData) {
+    LSTATUS status = fpRegQueryValueExW(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
+    if (status == ERROR_SUCCESS && lpData && (*lpType == REG_SZ || *lpType == REG_EXPAND_SZ)) {
+        wchar_t* data = (wchar_t*)lpData;
+        if ((data[0] == L'D' || data[0] == L'd') && data[1] == L':') {
+            data[0] = L'C';
+            WriteLog("Registro Unicode parcheado.");
+        }
+    }
+    return status;
+}
+
 DWORD WINAPI DetourGetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize) {
     DWORD result = fpGetModuleFileNameA(hModule, lpFilename, nSize);
-    if (result > 0 && lpFilename) {
-        if ((lpFilename[0] == 'D' || lpFilename[0] == 'd') && lpFilename[1] == ':') {
-            lpFilename[0] = 'C';
-        }
+    if (result > 0 && lpFilename && (lpFilename[0] == 'D' || lpFilename[0] == 'd')) {
+        lpFilename[0] = 'C';
     }
     return result;
 }
 
-// Función de inicialización
-DWORD WINAPI InitializePlugin(LPVOID lpParam) {
-    // Esperamos un segundo para que el juego termine de cargar sus librerías base
-    Sleep(1000);
+DWORD WINAPI DetourGetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize) {
+    DWORD result = fpGetModuleFileNameW(hModule, lpFilename, nSize);
+    if (result > 0 && lpFilename && (lpFilename[0] == L'D' || lpFilename[0] == L'd')) {
+        lpFilename[0] = L'C';
+    }
+    return result;
+}
 
+// --- HILO DE INICIALIZACIÓN ---
+DWORD WINAPI InitializePlugin(LPVOID lpParam) {
+    WriteLog("Iniciando hooks...");
+    
     if (MH_Initialize() == MH_OK) {
+        // Hookeamos ambas versiones (ANSI y Unicode) para asegurar captura total
         MH_CreateHookApi(L"advapi32", "RegQueryValueExA", (LPVOID)DetourRegQueryValueExA, (LPVOID*)&fpRegQueryValueExA);
+        MH_CreateHookApi(L"advapi32", "RegQueryValueExW", (LPVOID)DetourRegQueryValueExW, (LPVOID*)&fpRegQueryValueExW);
         MH_CreateHookApi(L"kernel32", "GetModuleFileNameA", (LPVOID)DetourGetModuleFileNameA, (LPVOID*)&fpGetModuleFileNameA);
+        MH_CreateHookApi(L"kernel32", "GetModuleFileNameW", (LPVOID)DetourGetModuleFileNameW, (LPVOID*)&fpGetModuleFileNameW);
         
-        if (MH_EnableHook(MH_ALL_HOOKS) == MH_OK) {
-            MessageBoxA(NULL, "PathFix 32-bit: Hooks de Registro Activos", "Ghost Recon", MB_OK);
-        }
+        MH_EnableHook(MH_ALL_HOOKS);
+        WriteLog("Hooks aplicados.");
     }
     return 0;
 }
@@ -50,7 +85,6 @@ DWORD WINAPI InitializePlugin(LPVOID lpParam) {
 BOOL WINAPI DllMain(HMODULE hInst, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hInst);
-        // Usamos un hilo para no congelar el arranque del juego
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InitializePlugin, NULL, 0, NULL);
     }
     return TRUE;
