@@ -1,47 +1,61 @@
 #include <windows.h>
 #include <fstream>
 #include <string>
+#include <algorithm>
 #include "MinHook.h"
 
-// --- REDIRECCIÓN DE REGISTRO ---
+// --- REDIRECCIÓN DE REGISTRO (Agresiva) ---
 typedef LSTATUS (WINAPI *REGQUERYVALUEEXA)(HKEY, LPCSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
 REGQUERYVALUEEXA fpRegQueryValueExA = NULL;
 
+typedef LSTATUS (WINAPI *REGENUMVALUEA)(HKEY, DWORD, LPSTR, LPDWORD, LPDWORD, LPDWORD, LPBYTE, LPDWORD);
+REGENUMVALUEA fpRegEnumValueA = NULL;
+
+// Helper para cambiar D: por C: en buffers de memoria
+void PatchBuffer(LPBYTE lpData, LPDWORD lpcbData, LPDWORD lpType) {
+    if (lpData && lpcbData && *lpcbData > 2 && (*lpType == REG_SZ || *lpType == REG_EXPAND_SZ)) {
+        if ((lpData[0] == 'D' || lpData[0] == 'd') && lpData[1] == ':') {
+            lpData[0] = 'C';
+        }
+    }
+}
+
 LSTATUS WINAPI DetourRegQueryValueExA(HKEY hKey, LPCSTR lpValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData) {
     LSTATUS status = fpRegQueryValueExA(hKey, lpValueName, lpReserved, lpType, lpData, lpcbData);
-    
-    // Si el juego pide una ruta y contiene "D:", la cambiamos por "C:"
-    if (status == ERROR_SUCCESS && lpData != NULL && *lpType == REG_SZ) {
-        std::string value = (char*)lpData;
-        if (value.size() > 2 && (value[0] == 'D' || value[0] == 'd') && value[1] == ':') {
-            ((char*)lpData)[0] = 'C';
-        }
+    if (status == ERROR_SUCCESS) {
+        PatchBuffer(lpData, lpcbData, lpType);
     }
     return status;
 }
 
-// --- REDIRECCIÓN DE ARCHIVOS ---
+LSTATUS WINAPI DetourRegEnumValueA(HKEY hKey, DWORD dwIndex, LPSTR lpValueName, LPDWORD lpcchValueName, LPDWORD lpReserved, LPDWORD lpType, LPBYTE lpData, LPDWORD lpcbData) {
+    LSTATUS status = fpRegEnumValueA(hKey, dwIndex, lpValueName, lpcchValueName, lpReserved, lpType, lpData, lpcbData);
+    if (status == ERROR_SUCCESS) {
+        PatchBuffer(lpData, lpcbData, lpType);
+    }
+    return status;
+}
+
+// --- REDIRECCIÓN DE ARCHIVOS (Kernel Base) ---
 typedef HANDLE (WINAPI *CREATEFILEA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 CREATEFILEA fpCreateFileA = NULL;
 
 HANDLE WINAPI DetourCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
-    std::string path = lpFileName;
-    // Si intenta leer en C:, lo mandamos a D: donde están los archivos reales
-    if (path.size() > 2 && (path[0] == 'C' || path[0] == 'c') && path[1] == ':') {
-        std::string redirected = path;
-        redirected[0] = 'D';
+    if (lpFileName && (lpFileName[0] == 'C' || lpFileName[0] == 'c') && lpFileName[1] == ':') {
+        std::string redirected = lpFileName;
+        redirected[0] = 'D'; // Redirigir físicamente a la unidad real
         return fpCreateFileA(redirected.c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
     }
     return fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
-// --- REDIRECCIÓN DE UBICACIÓN DEL MÓDULO ---
+// --- GETMODULEFILENAME (Ubicación del Proceso) ---
 typedef DWORD (WINAPI *GETMODULEFILENAMEA)(HMODULE, LPSTR, DWORD);
 GETMODULEFILENAMEA fpGetModuleFileNameA = NULL;
 
 DWORD WINAPI DetourGetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize) {
     DWORD result = fpGetModuleFileNameA(hModule, lpFilename, nSize);
-    if (result > 0 && lpFilename != NULL) {
+    if (result > 0 && lpFilename) {
         if (lpFilename[0] == 'D' || lpFilename[0] == 'd') {
             lpFilename[0] = 'C';
         }
@@ -52,14 +66,15 @@ DWORD WINAPI DetourGetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD n
 void Init() {
     if (MH_Initialize() != MH_OK) return;
 
-    // Hook 1: Engañar sobre dónde está el .exe
-    MH_CreateHookApi(L"kernel32", "GetModuleFileNameA", (LPVOID)DetourGetModuleFileNameA, (LPVOID*)&fpGetModuleFileNameA);
-    
-    // Hook 2: Engañar sobre lo que dice el Registro (InstallDir)
+    // Registro: Engañamos al juego diciéndole que su InstallDir está en C:
     MH_CreateHookApi(L"advapi32", "RegQueryValueExA", (LPVOID)DetourRegQueryValueExA, (LPVOID*)&fpRegQueryValueExA);
-    
-    // Hook 3: Redirigir la carga de archivos de C: a D:
+    MH_CreateHookApi(L"advapi32", "RegEnumValueA", (LPVOID)DetourRegEnumValueA, (LPVOID*)&fpRegEnumValueA);
+
+    // Archivos: Redirigimos sus peticiones de C: a tu unidad D: real
     MH_CreateHookApi(L"kernel32", "CreateFileA", (LPVOID)DetourCreateFileA, (LPVOID*)&fpCreateFileA);
+
+    // Módulo: Mentimos sobre la ruta del ejecutable
+    MH_CreateHookApi(L"kernel32", "GetModuleFileNameA", (LPVOID)DetourGetModuleFileNameA, (LPVOID*)&fpGetModuleFileNameA);
 
     MH_EnableHook(MH_ALL_HOOKS);
 }
